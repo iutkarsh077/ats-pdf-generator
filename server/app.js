@@ -25,11 +25,90 @@ app.use(express.json());
 
 const port = process.env.PORT || 3000;
 
+function extractAndCategorizeLinks(plainText, infoResultPages = []) {
+    const rawLinks = [];
+
+    if (Array.isArray(infoResultPages)) {
+        for (const p of infoResultPages) {
+            if (Array.isArray(p.links)) {
+                for (const l of p.links) {
+                    if (l && l.url) {
+                        rawLinks.push({
+                            text: (l.text || "").trim(),
+                            url: l.url.trim(),
+                            source: "annotation"
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    const mdRegex = /\[([^\]]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)/gi;
+    let match;
+    while ((match = mdRegex.exec(plainText)) !== null) {
+        rawLinks.push({
+            text: match[1].trim(),
+            url: match[2].trim(),
+            source: "markdown"
+        });
+    }
+    const urlRegex = /(?:https?:\/\/|www\.)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\/[^\s,;()]*[^\s,;().])?/gi;
+    while ((match = urlRegex.exec(plainText)) !== null) {
+        let u = match[0].trim();
+        if (u.startsWith("www.")) u = "https://" + u;
+        rawLinks.push({
+            text: "",
+            url: u,
+            source: "text"
+        });
+    }
+
+    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
+    while ((match = emailRegex.exec(plainText)) !== null) {
+        const email = match[0].trim();
+        rawLinks.push({
+            text: email,
+            url: `mailto:${email}`,
+            source: "email"
+        });
+    }
+
+    const seen = new Set();
+    const unique = [];
+    for (const item of rawLinks) {
+        if (!item.url) continue;
+        const norm = item.url.replace(/\/+$/, "").toLowerCase();
+        if (!seen.has(norm)) {
+            seen.add(norm);
+            unique.push(item);
+        }
+    }
+
+    return unique;
+}
+
 async function extractTextFromPdfBuffer(buffer) {
     const parser = new PDFParse({ data: buffer });
     try {
-        const textResult = await parser.getText();
-        return (textResult.text || "").trim();
+
+        const textResult = await parser.getText({ parseHyperlinks: true });
+        const plainText = (textResult.text || "").trim();
+
+        let infoPages = [];
+        try {
+            const infoResult = await parser.getInfo({ parsePageInfo: true });
+            infoPages = infoResult?.pages || [];
+        } catch (infoErr) {
+            console.warn("Could not parse page link annotations:", infoErr.message);
+        }
+
+        const links = extractAndCategorizeLinks(plainText, infoPages);
+
+        return {
+            text: plainText,
+            links: links
+        };
     } finally {
         await parser.destroy();
     }
@@ -128,6 +207,7 @@ app.post(["/llm-prompt", "/api/llm-prompt"], async (req, res) => {
         console.log(`Job description received (${jobDescription.trim().length} chars).`);
 
         let candidateResumeText = "";
+        let candidateLinks = [];
 
         if (resumeKey) {
             console.log(`Loading uploaded PDF from AWS S3 (Key: ${resumeKey})...`);
@@ -135,9 +215,12 @@ app.post(["/llm-prompt", "/api/llm-prompt"], async (req, res) => {
                 const pdfBuffer = await downloadFileFromS3(resumeKey);
                 console.log(`Downloaded ${pdfBuffer.length} bytes from S3.`);
 
-                console.log("Parsing PDF text and sections...");
-                candidateResumeText = await extractTextFromPdfBuffer(pdfBuffer);
+                console.log("Parsing PDF text, annotations, and embedded links...");
+                const extraction = await extractTextFromPdfBuffer(pdfBuffer);
+                candidateResumeText = extraction.text;
+                candidateLinks = extraction.links || [];
                 console.log(`Extracted ${candidateResumeText.length} characters of resume text from PDF.`);
+                console.log(`Detected ${candidateLinks.length} embedded hyperlinks from PDF:`, candidateLinks.map(l => l.url));
             } catch (s3Error) {
                 console.error("Error downloading/parsing PDF from S3:", s3Error);
             }
@@ -150,7 +233,8 @@ app.post(["/llm-prompt", "/api/llm-prompt"], async (req, res) => {
             metadata: {
                 source: resumeKey || "direct_input",
                 hasOriginalResume: Boolean(candidateResumeText),
-                templateId: chosenTemplate.id
+                templateId: chosenTemplate.id,
+                linksCount: candidateLinks.length
             }
         });
 
@@ -162,6 +246,7 @@ app.post(["/llm-prompt", "/api/llm-prompt"], async (req, res) => {
 
         const promptText = buildMasterPrompt({
             candidateResumeText: resumeDoc.pageContent,
+            candidateLinks: candidateLinks,
             jobDescription: jobDescription,
             referenceTemplateHtml: chosenTemplate.html
         });

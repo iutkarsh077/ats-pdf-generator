@@ -918,8 +918,15 @@ export function getTemplateById(id) {
 // Backward compatibility export
 export const referenceHtmlTemplate = templateExecutiveNavy;
 
-// Master prompt generator that accepts candidate data, job description, and template HTML
-export function buildMasterPrompt({ candidateResumeText, jobDescription, referenceTemplateHtml }) {
+export function buildMasterPrompt({ candidateResumeText, candidateLinks = [], jobDescription, referenceTemplateHtml }) {
+  let embeddedLinksSection = "";
+  if (Array.isArray(candidateLinks) && candidateLinks.length > 0) {
+    embeddedLinksSection = `
+## Verified Embedded Hyperlinks & URLs Extracted from Candidate's PDF:
+${candidateLinks.map(l => `- ${l.text ? `[${l.text}] ` : ""}${l.url}`).join("\n")}
+`;
+  }
+
   return `# Master Prompt: Resume-to-HTML/CSS Tailored Alignment Generator
 
 You are an expert executive resume architect, technical recruiter, ATS optimization specialist, and HTML/CSS document designer.
@@ -930,6 +937,7 @@ The generated HTML will be rendered into a PDF using Puppeteer. Therefore, the H
 
 ## 1. Candidate's Uploaded Resume (Source of Truth for Experience, Contact & Credentials)
 ${candidateResumeText || "No previous resume uploaded. Create layout using criteria."}
+${embeddedLinksSection}
 
 ## 2. Target Job Description & Role Requirements (Alignment Target)
 ${jobDescription || ""}
@@ -937,7 +945,18 @@ ${jobDescription || ""}
 ## 3. Strict Transformation Rules:
 1. **Preserve Authenticity**: Preserve the candidate's actual work history, employers, titles, graduation, metrics, and real skills from their uploaded resume. DO NOT fabricate nonexistent degrees, fictitious companies, or imaginary credentials.
 2. **ATS & Keyword Alignment**: Re-order, tailor, and emphasize technical skills, summary statements, and experience bullet points that directly match the keywords and expectations of the Target Job Description.
-3. **Hyperlinks & Header**: Keep contact info (phone, email, location, LinkedIn, GitHub) strictly on a single line or as structured in the reference template. DO NOT wrap links awkwardly. Never use bright blue underlines unless specified in the template.
+3. **Preserve Clickable Hyperlinks in <a> Tags (CRITICAL)**:
+   - The candidate's resume includes embedded links (e.g. LinkedIn, GitHub, Portfolio/Website, Email, Project Demos, Repositories).
+   - You MUST convert these into clickable HTML \`<a href="..." target="_blank">\` tags in the output HTML! Puppeteer automatically preserves these as clickable links in the resulting PDF.
+   - For contact headers:
+     - Wrap email in \`<a href="mailto:email@address.com">email@address.com</a>\`.
+     - Wrap LinkedIn in \`<a href="https://linkedin.com/in/..." target="_blank">LinkedIn</a>\` (or the handle/URL as shown in the template).
+     - Wrap GitHub in \`<a href="https://github.com/..." target="_blank">GitHub</a>\` (or handle/URL).
+     - Wrap Portfolio/Website in \`<a href="https://..." target="_blank">Portfolio</a>\`.
+   - For Projects & Experience:
+     - If a project, publication, or repo has an extracted URL or live demo, wrap the project title or demo link in \`<a href="URL" target="_blank">Project Name</a>\`.
+   - NEVER use placeholder links like \`href="#"\` or generic \`href="https://linkedin.com"\` when the candidate's actual profile/project URL is available.
+   - Do NOT add bright blue underlined styling unless specified in the template CSS. All templates include \`a { color: inherit; text-decoration: none; }\` so that links remain clickable in the compiled PDF without visual clutter.
 4. **Strict Visual Design & No Heavy Borders**:
    - Follow the exact visual layout and CSS rules of the reference template below.
    - DO NOT introduce arbitrary thick black borders (e.g., \`border-bottom: 2px solid black\` is strictly forbidden unless present in the template).
